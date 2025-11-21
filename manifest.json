@@ -1,0 +1,7 @@
+{
+  "domain": "esb_integration",
+  "name": "ESB Integration",
+  "version": "0.0.1",
+  "config_flow": true,
+  "requirements": ["requests"]
+}
