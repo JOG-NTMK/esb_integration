@@ -3,5 +3,5 @@
   "name": "ESB Integration",
   "version": "0.0.1",
   "config_flow": true,
-  "requirements": ["requests"]
+  "requirements": ["requests", "beautifulsoup4", "pytz"]
 }

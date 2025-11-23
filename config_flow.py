@@ -1,10 +1,8 @@
 """Config flow for ESB Integration."""
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback
 
 from .const import DOMAIN
-
 
 class ESBConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for ESB Integration."""
@@ -16,9 +14,6 @@ class ESBConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            # Here you would validate the credentials
-            # For now, we'll just accept any input
-
             # Create a unique ID based on the MPRN
             await self.async_set_unique_id(user_input["mprn"])
             self._abort_if_unique_id_configured()
