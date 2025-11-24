@@ -1,6 +1,6 @@
 {
   "name": "ESB Integration",
-  "content_in_root": false,
+  "content_in_root": true,
   "filename": "esb_integration",
   "render_readme": true,
   "domains": ["sensor"],
