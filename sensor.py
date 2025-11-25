@@ -111,7 +111,7 @@ class ESBDataUpdateCoordinator(DataUpdateCoordinator):
                 source=DOMAIN,
                 statistic_id=statistic_id,
                 unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-                unit_class=None
+                unit_class=SensorDeviceClass.ENERGY,
             )
 
             # Get the last imported statistic to avoid duplicates
