@@ -6,5 +6,6 @@
   "requirements": ["requests", "beautifulsoup4", "pytz"],
   "iot_class": "cloud_polling",
   "documentation": "https://github.com/JOG-NTMK/esb_integration",
-  "codeowners": ["@JOG-NTMK"]
+  "codeowners": ["@JOG-NTMK"],
+  "statistics": true
 }
