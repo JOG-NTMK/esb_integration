@@ -1,5 +1,4 @@
 """ESB Electricity Usage Sensor."""
-import os
 from datetime import timedelta, datetime, timezone
 import logging
 
@@ -16,18 +15,26 @@ from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import StatisticMetaData, StatisticMeanType
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    get_last_statistics,
+    statistics_during_period,
 )
-import pytz
 
 from .const import DOMAIN
 from .esb_api import ESBSmartMeter
+from .readings import (
+    READ_TYPE_EXPORT,
+    READ_TYPE_IMPORT,
+    cumulative_statistics,
+    hourly_usage,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(hours=24)
-TZ_STRING = os.getenv('TZ', 'Europe/Dublin')
-TIMEZONE = pytz.timezone(TZ_STRING)
+EARLIEST_STATISTIC = datetime(2000, 1, 1, tzinfo=timezone.utc)
+STATISTICS = (
+    (READ_TYPE_IMPORT, "consumption", "ESB Energy"),
+    (READ_TYPE_EXPORT, "export", "ESB Export"),
+)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -97,117 +104,55 @@ class ESBDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error communicating with ESB API: {error}")
 
     async def _async_import_statistics(self, data):
-        """Import historical readings as statistics."""
-        try:
-            statistic_id = f"{DOMAIN}:esb_{self.mprn}_consumption"
+        """Import historical import and export readings as separate statistics."""
+        for read_type, suffix, label in STATISTICS:
+            await self._async_import_statistic(data["readings"], read_type, suffix, label)
 
-            _LOGGER.info(f"Starting statistics import for {statistic_id}")
-            _LOGGER.info(f"Total readings to process: {len(data.get('readings', []))}")
+    async def _async_sum_before(self, statistic_id, hour):
+        """Return the cumulative sum of the newest statistic before an hour."""
+        existing = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            EARLIEST_STATISTIC,
+            hour,
+            {statistic_id},
+            "hour",
+            None,
+            {"sum"},
+        )
+        rows = existing.get(statistic_id)
+        return rows[-1]["sum"] if rows else 0
 
-            metadata = StatisticMetaData(
-                mean_type=StatisticMeanType.NONE,
-                has_sum=True,
-                name=f"ESB Energy {self.mprn}",
-                source=DOMAIN,
-                statistic_id=statistic_id,
-                unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-                unit_class=SensorDeviceClass.ENERGY,
-            )
+    async def _async_import_statistic(self, readings, read_type, suffix, label):
+        """Rebuild the statistic for one read type from every reading in the file.
 
-            # Get the last imported statistic to avoid duplicates
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics, self.hass, 1, statistic_id, True,
-                {"state", "sum", "min", "max", "mean", "last_reset"}
-            )
+        Rewriting all hours each time completes the hour that was partial in the
+        last download and replaces anything imported earlier for those hours.
+        """
+        statistic_id = f"{DOMAIN}:esb_{self.mprn}_{suffix}"
+        hourly = hourly_usage(readings, read_type)
+        if not hourly:
+            read_types = sorted({reading.get("type", "") for reading in readings})
+            _LOGGER.warning(f"No usable '{read_type}' readings for {statistic_id}: {read_types}")
+            return
 
-            last_time = None
-            last_sum = 0
-            if statistic_id in last_stats:
-                last_stat = last_stats[statistic_id][0]
-                # Convert timestamp to ENV timezone for proper comparison
-                last_time_utc = datetime.fromtimestamp(last_stat["start"], tz=timezone.utc)
-                last_time = last_time_utc.astimezone(TIMEZONE)
-                last_sum = last_stat.get("sum", 0)
+        metadata = StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"{label} {self.mprn}",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+            unit_class=SensorDeviceClass.ENERGY,
+        )
+        base_sum = await self._async_sum_before(statistic_id, next(iter(hourly)))
+        statistics = cumulative_statistics(hourly, base_sum)
 
-                # If sum is 0, ignore last_time (means no real data was imported)
-                if last_sum == 0:
-                    _LOGGER.info("Last statistic has sum=0, treating as no previous data")
-                    last_time = None
-                else:
-                    _LOGGER.info(f"Last imported statistic: {last_time}, sum: {last_sum}")
-            else:
-                _LOGGER.info("No previous statistics found, importing all data")
-
-            # Process readings into statistics
-            # Group half-hourly readings into hourly readings
-            hourly_readings = {}
-            parse_errors = 0
-
-            for reading in data.get("readings", []):
-                try:
-                    reading_date_str = reading.get("date", "")
-                    if not reading_date_str:
-                        parse_errors += 1
-                        continue
-
-                    # Parse ESB date format: DD-MM-YYYY HH:MM
-                    try:
-                        naive_dt = datetime.strptime(reading_date_str, "%d-%m-%Y %H:%M")
-                        # Round down to the top of the hour
-                        hour_dt = naive_dt.replace(minute=0, second=0, microsecond=0)
-                        reading_time = TIMEZONE.localize(hour_dt)
-                    except ValueError as e:
-                        if parse_errors < 5:
-                            _LOGGER.warning(f"Could not parse date '{reading_date_str}': {e}")
-                        parse_errors += 1
-                        continue
-
-                    usage = float(reading.get("usage", 0))
-
-                    # Aggregate readings by hour
-                    if reading_time in hourly_readings:
-                        hourly_readings[reading_time] += usage
-                    else:
-                        hourly_readings[reading_time] = usage
-
-                except (ValueError, KeyError) as e:
-                    parse_errors += 1
-                    continue
-
-            # Convert aggregated hourly readings to statistics
-            statistics = []
-            cumulative_sum = last_sum
-            skipped = 0
-
-            for reading_time in sorted(hourly_readings.keys()):
-                # Skip if we already have this data
-                if last_time and reading_time <= last_time:
-                    skipped += 1
-                    continue
-
-                usage = hourly_readings[reading_time]
-                cumulative_sum += usage
-
-                # Create statistic dict
-                statistics.append({
-                    "start": reading_time,
-                    "sum": cumulative_sum,
-                    "state": usage,
-                })
-
-            _LOGGER.info(f"Statistics summary: {len(statistics)} new, {skipped} skipped, {parse_errors} errors")
-
-            if statistics:
-                _LOGGER.info(f"Importing {len(statistics)} statistics for ESB meter {self.mprn}")
-                _LOGGER.info(f"Date range: {statistics[0]['start']} to {statistics[-1]['start']}")
-                async_add_external_statistics(self.hass, metadata, statistics)
-                _LOGGER.info("async_add_external_statistics call completed")
-            else:
-                _LOGGER.warning("No statistics to import!")
-
-        except Exception as e:
-            _LOGGER.error(f"Exception in _async_import_statistics: {e}", exc_info=True)
-            raise
+        _LOGGER.info(
+            f"Importing {len(statistics)} statistics for {statistic_id}: "
+            f"{statistics[0]['start']} to {statistics[-1]['start']}"
+        )
+        async_add_external_statistics(self.hass, metadata, statistics)
 
 class ESBElectricitySensor(CoordinatorEntity, SensorEntity):
     """Representation of an ESB Electricity Usage sensor."""
@@ -243,6 +188,7 @@ class ESBElectricitySensor(CoordinatorEntity, SensorEntity):
 
             return {
                 "total_readings": len(readings),
+                "total_export": round(self.coordinator.data.get("total_export", 0), 2),
                 "last_updated": self.coordinator.data.get("last_updated"),
                 "sample_reading": readings[0] if readings else None,
             }

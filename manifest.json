@@ -3,6 +3,7 @@
   "name": "ESB Integration",
   "version": "0.0.1",
   "config_flow": true,
+  "dependencies": ["recorder"],
   "requirements": ["requests", "beautifulsoup4", "pytz"],
   "iot_class": "cloud_polling",
   "documentation": "https://github.com/JOG-NTMK/esb_integration",
