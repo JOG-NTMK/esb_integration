@@ -16,6 +16,9 @@ _LOGGER = logging.getLogger(__name__)
 DEBUG_USE_CACHE = os.getenv('ESB_DEBUG_CACHE', 'false').lower() == 'true'
 CACHE_FILE = '/config/esb_cache.json'
 
+HISTORIC_CONSUMPTION_URL = 'https://myaccount.esbnetworks.ie/energymanagement/historic-consumption'
+DOWNLOAD_URL = 'https://myaccount.esbnetworks.ie/energymanagement/api/consumption/DownloadHdfPeriodic'
+
 class ESBSmartMeter:
     """Class to interact with ESB Smart Meter data."""
 
@@ -151,7 +154,7 @@ class ESBSmartMeter:
 
             # REQUEST 6 - Access consumption page
             session.get(
-                'https://myaccount.esbnetworks.ie/Api/HistoricConsumption',
+                HISTORIC_CONSUMPTION_URL,
                 headers={'User-Agent': self.user_agent},
                 cookies={
                     'ARRAffinity': request_4_response_cookies.get('ARRAffinity'),
@@ -168,7 +171,7 @@ class ESBSmartMeter:
                 'https://myaccount.esbnetworks.ie/af/t',
                 headers={
                     'User-Agent': self.user_agent,
-                    'X-Returnurl': 'https://myaccount.esbnetworks.ie/Api/HistoricConsumption',
+                    'X-Returnurl': HISTORIC_CONSUMPTION_URL,
                 },
                 cookies={
                     'ARRAffinity': request_4_response_cookies.get('ARRAffinity'),
@@ -181,11 +184,14 @@ class ESBSmartMeter:
             # REQUEST 8 - Download data file
             _LOGGER.info("Downloading usage data...")
             request_8_response = session.post(
-                'https://myaccount.esbnetworks.ie/DataHub/DownloadHdfPeriodic',
+                DOWNLOAD_URL,
                 headers={
                     'User-Agent': self.user_agent,
                     'Content-Type': 'application/json',
                     'X-Xsrf-Token': file_download_token,
+                    'X-Returnurl': HISTORIC_CONSUMPTION_URL,
+                    'Referer': HISTORIC_CONSUMPTION_URL,
+                    'Origin': 'https://myaccount.esbnetworks.ie',
                 },
                 json={
                     'mprn': self.mprn,
@@ -196,10 +202,15 @@ class ESBSmartMeter:
             session.close()
 
             # Parse CSV data
-            csv_file = request_8_response.content.decode('utf-8')
+            csv_file = request_8_response.content.decode('utf-8', errors='replace')
 
             if csv_file[0:4] != 'MPRN':
-                raise Exception("Invalid CSV format received")
+                raise Exception(
+                    f"Invalid CSV format received from {DOWNLOAD_URL}: "
+                    f"HTTP {request_8_response.status_code}, "
+                    f"content type {request_8_response.headers.get('Content-Type')}, "
+                    f"body starts {csv_file[:200]!r}"
+                )
 
             # Convert to JSON
             my_json = []
