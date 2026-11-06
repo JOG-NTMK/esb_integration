@@ -53,6 +53,7 @@ The integration will immediately fetch your historical data. This may take 30-60
 2. Click **Add Consumption**
 3. Under "Statistics", select **ESB Energy [YOUR_MPRN]**
 4. Save
+5. If you export to the grid, click **Add Return** and select **ESB Export [YOUR_MPRN]**
 
 ### Statistics Graph Card
 
@@ -122,12 +123,20 @@ Trigger a manual data fetch:
 
 You've exceeded ESB's 2 login per 24-hour limit. Wait until midnight (Irish time) and try again.
 
-### "No statistics to import"
+### "No usable readings"
+
+The download worked but no readings could be turned into statistics. The log message lists the read types that were found.
 
 1. Check logs for parsing errors
 2. Verify your MPRN is correct
 3. Ensure your meter is linked to your ESB account
 4. Try clearing statistics and re-importing (see below)
+
+For **ESB Export**, this is expected if your meter doesn't report export.
+
+### Statistics don't show up
+
+Imported data is a statistic, not a sensor history. In the Energy Dashboard and Statistics Graph Card, select **ESB Energy [YOUR_MPRN]**, not the `sensor.esb_electricity_[YOUR_MPRN]` entity.
 
 ### Clearing Statistics
 

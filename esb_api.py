@@ -5,16 +5,20 @@ from time import sleep
 from bs4 import BeautifulSoup
 import re
 import json
-import csv
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
+
+from .readings import parse_usage_csv
 
 _LOGGER = logging.getLogger(__name__)
 
 # Set to True to use cached data during development
 DEBUG_USE_CACHE = os.getenv('ESB_DEBUG_CACHE', 'false').lower() == 'true'
 CACHE_FILE = '/config/esb_cache.json'
+
+HISTORIC_CONSUMPTION_URL = 'https://myaccount.esbnetworks.ie/energymanagement/historic-consumption'
+DOWNLOAD_URL = 'https://myaccount.esbnetworks.ie/energymanagement/api/consumption/DownloadHdfPeriodic'
 
 class ESBSmartMeter:
     """Class to interact with ESB Smart Meter data."""
@@ -61,7 +65,7 @@ class ESBSmartMeter:
 
             # REQUEST 2 - Login POST
             _LOGGER.info("Logging in to ESB Networks...")
-            request_2_response = session.post(
+            session.post(
                 f'https://login.esbnetworks.ie/esbntwkscustportalprdb2c01.onmicrosoft.com/B2C_1A_signup_signin/SelfAsserted?tx={transId}&p=B2C_1A_signup_signin',
                 data={
                     'signInName': self.email,
@@ -102,7 +106,6 @@ class ESBSmartMeter:
             )
 
             # Check if login was successful
-            tester_soup = BeautifulSoup(request_3_response.content, 'html.parser')
             request_3_response_head_test = request_3_response.text[0:21]
 
             if request_3_response_head_test != "<!DOCTYPE html PUBLIC":
@@ -120,7 +123,7 @@ class ESBSmartMeter:
             sleep(randint(2, 5))
 
             # REQUEST 4 - Complete authentication
-            request_4_response = session.post(
+            session.post(
                 login_url_,
                 allow_redirects=False,
                 data={'state': state_, 'client_info': client_info_, 'code': code_},
@@ -135,7 +138,7 @@ class ESBSmartMeter:
             request_4_response_cookies = session.cookies.get_dict()
 
             # REQUEST 5 - Access main portal
-            request_5_response = session.get(
+            session.get(
                 'https://myaccount.esbnetworks.ie',
                 headers={'User-Agent': self.user_agent},
                 cookies={
@@ -151,7 +154,7 @@ class ESBSmartMeter:
 
             # REQUEST 6 - Access consumption page
             session.get(
-                'https://myaccount.esbnetworks.ie/Api/HistoricConsumption',
+                HISTORIC_CONSUMPTION_URL,
                 headers={'User-Agent': self.user_agent},
                 cookies={
                     'ARRAffinity': request_4_response_cookies.get('ARRAffinity'),
@@ -168,7 +171,7 @@ class ESBSmartMeter:
                 'https://myaccount.esbnetworks.ie/af/t',
                 headers={
                     'User-Agent': self.user_agent,
-                    'X-Returnurl': 'https://myaccount.esbnetworks.ie/Api/HistoricConsumption',
+                    'X-Returnurl': HISTORIC_CONSUMPTION_URL,
                 },
                 cookies={
                     'ARRAffinity': request_4_response_cookies.get('ARRAffinity'),
@@ -181,11 +184,14 @@ class ESBSmartMeter:
             # REQUEST 8 - Download data file
             _LOGGER.info("Downloading usage data...")
             request_8_response = session.post(
-                'https://myaccount.esbnetworks.ie/DataHub/DownloadHdfPeriodic',
+                DOWNLOAD_URL,
                 headers={
                     'User-Agent': self.user_agent,
                     'Content-Type': 'application/json',
                     'X-Xsrf-Token': file_download_token,
+                    'X-Returnurl': HISTORIC_CONSUMPTION_URL,
+                    'Referer': HISTORIC_CONSUMPTION_URL,
+                    'Origin': 'https://myaccount.esbnetworks.ie',
                 },
                 json={
                     'mprn': self.mprn,
@@ -196,44 +202,22 @@ class ESBSmartMeter:
             session.close()
 
             # Parse CSV data
-            csv_file = request_8_response.content.decode('utf-8')
+            csv_file = request_8_response.content.decode('utf-8', errors='replace')
 
             if csv_file[0:4] != 'MPRN':
-                raise Exception("Invalid CSV format received")
+                raise Exception(
+                    f"Invalid CSV format received from {DOWNLOAD_URL}: "
+                    f"HTTP {request_8_response.status_code}, "
+                    f"content type {request_8_response.headers.get('Content-Type')}, "
+                    f"body starts {csv_file[:200]!r}"
+                )
 
-            # Convert to JSON
-            my_json = []
-            csv_reader = csv.DictReader(csv_file.split('\n'))
-            for row in csv_reader:
-                if row:  # Skip empty rows
-                    my_json.append(row)
-
-            # Process the data for Home Assistant
-            total_usage = 0
-            readings = []
-
-            for row in my_json:
-                try:
-                    date_str = row.get('Read Date and End Time', '')
-                    usage = float(row.get('Read Value', 0))
-                    total_usage += usage
-
-                    readings.append({
-                        'date': date_str,
-                        'usage': usage,
-                        'type': row.get('Read Type', ''),
-                    })
-                except (ValueError, KeyError) as e:
-                    _LOGGER.warning(f"Error parsing row: {e}")
-                    continue
+            result = parse_usage_csv(csv_file)
+            readings = result['readings']
 
             _LOGGER.info(f"Successfully fetched {len(readings)} readings")
 
-            result = {
-                'total_usage': total_usage,
-                'readings': readings,
-                'last_updated': datetime.now().isoformat(),
-            }
+            result['last_updated'] = datetime.now().isoformat()
 
             # Cache the data for development (only cache serializable data)
             if not DEBUG_USE_CACHE:  # Only cache on real fetches
